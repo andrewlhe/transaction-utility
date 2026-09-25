@@ -62,8 +62,9 @@ class TxEntry:
 @dataclass
 class SettleResult:
     details: List[str] = field(default_factory=list)
-    net: Dict[str, float] = field(default_factory=dict)  # "ABCDEF" -> amount owed by ABC to DEF
+    net: Dict[Tuple[str, str], float] = field(default_factory=dict)  # ((pair, currency)) -> amount owed
     elapsed_ms: int = 0
+    sheet_name: Optional[str] = None
 
 
 def calculate(path: str, filter_text: str = "") -> SettleResult:
@@ -74,14 +75,17 @@ def calculate(path: str, filter_text: str = "") -> SettleResult:
     elif filter_text:
         filter_names.add(filter_text.strip())
 
-    rows = load_table(path)
+    rows, sheet_name = load_table(path, want_sheet=True)  # type: ignore[misc]
+    result.sheet_name = sheet_name
 
     # Skip header.
     if not rows:
         return result
     rows = rows[1:]
 
-    first: Dict[str, float] = {}
+    # first[(pair, currency)] accumulates per settling currency, so different
+    # currencies are never added together.
+    first: Dict[Tuple[str, str], float] = {}
     line_count = 0
     import time
     start = time.perf_counter()
@@ -107,7 +111,9 @@ def calculate(path: str, filter_text: str = "") -> SettleResult:
             payer, payee = payee, payer
 
         key = payer + payee
-        first[key] = first.get(key, 0.0) + total_settlement
+        first[(key, currency_settlement)] = (
+            first.get((key, currency_settlement), 0.0) + total_settlement
+        )
 
         if filter_names and payer not in filter_names and payee not in filter_names:
             continue
@@ -122,48 +128,59 @@ def calculate(path: str, filter_text: str = "") -> SettleResult:
                 f"({total_local:.2f} {currency_local}) for {payer:>3s} at {date} at {seller}"
             )
 
-    # Netting pass (TreeMap iteration == sorted keys).
-    second: Dict[str, float] = {}
-    for key in sorted(first):
-        reversed_key = key[3:6] + key[0:3]
-        if reversed_key in second:
-            second[reversed_key] -= first[key]
-        elif key in second:
-            # The Java original read second.get(reversedKey) here (a latent bug that
-            # is unreachable given sorted iteration); we reproduce the intended
-            # behaviour of adding to the existing key.
-            second[key] += first[key]
-        else:
-            second[key] = first[key]
+    # Netting pass: within each currency (TreeMap iteration == sorted keys).
+    # Group first by currency so EUR never nets against USD.
+    by_currency: Dict[str, Dict[str, float]] = {}
+    for (key, cur), amount in first.items():
+        by_currency.setdefault(cur, {})[key] = amount
 
-    third: Dict[str, float] = {}
-    for key in sorted(second):
-        amount = second[key]
-        if amount < 0.0:
-            third[key[3:6] + key[0:3]] = -amount
-        else:
-            third[key] = amount
+    third: Dict[Tuple[str, str], float] = {}
+    for cur in sorted(by_currency):
+        first_cur = by_currency[cur]
+        second: Dict[str, float] = {}
+        for key in sorted(first_cur):
+            reversed_key = key[3:6] + key[0:3]
+            if reversed_key in second:
+                second[reversed_key] -= first_cur[key]
+            elif key in second:
+                # The Java original read second.get(reversedKey) here (a latent bug that
+                # is unreachable given sorted iteration); we reproduce the intended
+                # behaviour of adding to the existing key.
+                second[key] += first_cur[key]
+            else:
+                second[key] = first_cur[key]
+
+        for key in sorted(second):
+            amount = second[key]
+            if amount < 0.0:
+                third[(key[3:6] + key[0:3], cur)] = -amount
+            else:
+                third[(key, cur)] = amount
 
     result.elapsed_ms = int((time.perf_counter() - start) * 1000)
-    for key in sorted(third):
+    for (key, cur) in sorted(third):
         party1, party2 = key[0:3], key[3:6]
-        amount = third[key]
+        amount = third[(key, cur)]
         if filter_names and party1 not in filter_names and party2 not in filter_names:
             continue
-        # Only show meaningful balances (>= 1 USD) in the final report;
-        # the calculation above keeps all values so nothing is lost.
+        # Only show meaningful balances (>= 1 in the settling currency) in the
+        # final report; the calculation above keeps all values so nothing is lost.
         if amount < 1.0:
             continue
-        result.net[key] = amount
+        result.net[(key, cur)] = amount
     return result
 
 
 def format_summary(result: SettleResult) -> str:
     lines: List[str] = list(result.details)
     lines.append("")
+    if result.sheet_name:
+        lines.append(f"Sheet: {result.sheet_name}")
     lines.append(f"Calculation finished in {result.elapsed_ms / 1000.0:.6f} ms")
     lines.append("")
-    for key in sorted(result.net):
+    for (key, cur) in sorted(result.net, key=lambda k: (k[1], k[0])):
         party1, party2 = key[0:3], key[3:6]
-        lines.append(f"{party1} needs to pay {party2} {result.net[key]:.2f} USD")
+        lines.append(
+            f"{party1} needs to pay {party2} {result.net[(key, cur)]:.2f} {cur}"
+        )
     return "\n".join(lines)

@@ -91,15 +91,21 @@ def _cell_to_text(value: object) -> str:
     return str(value)
 
 
-def load_table(path: str) -> List[List[str]]:
+def load_table(
+    path: str, want_sheet: bool = False
+) -> object:
     """Read a CSV or XLSX file as a list of rows, each a list of strings.
 
     Recognised extensions:
         * .csv / .txt / .tsv -> split on commas (CSV layout, same as Java)
-        * .xlsx -> first sheet via openpyxl
+        * .xlsx -> the "transaction" sheet (case-insensitive) if present,
+          otherwise the first sheet
 
     Old .xls files are not supported (install ``xlrd`` if you need them).
     Empty rows are skipped.
+
+    If *want_sheet* is True, returns ``(rows, sheet_name)`` where sheet_name is
+    None for CSV and the actual sheet title for XLSX.
     """
     ext = os.path.splitext(path)[1].lower()
     if ext in (".csv", ".txt", ""):
@@ -109,10 +115,13 @@ def load_table(path: str) -> List[List[str]]:
                 if not line.strip():
                     continue
                 rows.append(line.split(","))
-            return rows
+            return (rows, None) if want_sheet else rows
     if ext == ".tsv":
         with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
-            return [line.split("\t") for line in f.read().splitlines() if line.strip()]
+            rows = [
+                line.split("\t") for line in f.read().splitlines() if line.strip()
+            ]
+            return (rows, None) if want_sheet else rows
     if ext == ".xlsx":
         try:
             import openpyxl  # type: ignore
@@ -121,14 +130,33 @@ def load_table(path: str) -> List[List[str]]:
                 "Reading .xlsx files requires openpyxl. Install it with: pip install openpyxl"
             ) from e
         wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-        ws = wb.active
+        # Prefer the "Transaction"/"Transactions" sheet (case-insensitive);
+        # fall back to any sheet whose name starts with "transaction",
+        # then to the active sheet.
+        ws = None
+        sheet_name: Optional[str] = None
+        for name in wb.sheetnames:
+            if name.strip().lower() in ("transaction", "transactions"):
+                ws = wb[name]
+                sheet_name = name
+                break
+        if ws is None:
+            for name in wb.sheetnames:
+                if name.strip().lower().startswith("transaction"):
+                    ws = wb[name]
+                    sheet_name = name
+                    break
+        if ws is None:
+            ws = wb.active
+            sheet_name = ws.title if ws is not None else None
         rows = []
-        for raw_row in ws.iter_rows(values_only=True):
-            cells = [_cell_to_text(v) for v in raw_row]
-            # Skip fully-empty rows.
-            if not any(c != "" for c in cells):
-                continue
-            rows.append(cells)
+        if ws is not None:
+            for raw_row in ws.iter_rows(values_only=True):
+                cells = [_cell_to_text(v) for v in raw_row]
+                # Skip fully-empty rows.
+                if not any(c != "" for c in cells):
+                    continue
+                rows.append(cells)
         wb.close()
-        return rows
+        return (rows, sheet_name) if want_sheet else rows
     raise ValueError(f"Unsupported table extension: {ext!r}. Use .csv or .xlsx.")

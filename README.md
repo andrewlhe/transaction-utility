@@ -32,8 +32,17 @@ CSV or XLSX with a header row. Columns used (0-indexed):
 
 ## Output
 
-For each pair, the final report shows only balances **>= 1 USD**. Small
-amounts are excluded to reduce noise (the full calculation is still performed).
+For each pair, the final report shows only balances **>= 1 in the settling
+currency**. Small amounts are excluded to reduce noise (the full calculation is
+still performed).
+
+**Multi-currency:** the netting is grouped per `currencySettlement`, so USD
+balances never net against EUR balances. Each reported balance is labelled
+with its currency.
+
+**XLSX sheet selection:** when the input is an `.xlsx` file, the sheet named
+`Transaction` (case-insensitive) is used automatically if present; otherwise
+the first sheet is used. The report shows which sheet was read.
 
 ## Structure
 

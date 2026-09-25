@@ -70,6 +70,19 @@ class TransactionPanel(ttk.Frame):
         try:
             result = transaction_calculator.calculate(self.input_file, self.filter_var.get())
             _set_text(self.text, transaction_calculator.format_summary(result))
+        except PermissionError as e:
+            _append_text(
+                self.text,
+                "Error: cannot read the file (permission denied).\n\n"
+                f"{e}\n\n"
+                "Possible causes:\n"
+                "  1. The file is currently open in Excel or another program -\n"
+                "     close it and try again.\n"
+                "  2. The file is on OneDrive and only exists in the cloud -\n"
+                "     in File Explorer right-click it and choose\n"
+                "     'Always keep on this device' to download it, then retry.\n"
+                "  3. Try copying the file to a local folder first.",
+            )
         except Exception as e:  # noqa: BLE001 - mirror Java's "Error" box
             _append_text(self.text, f"Error\n\n{e}")
 
